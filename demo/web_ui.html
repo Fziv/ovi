@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OVI OpenCV Integration</title>
+    <script async src="https://docs.opencv.org/4.8.0/opencv.js" onload="onOpenCvReady();" type="text/javascript"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f0f0f0;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .video-container {
+            width: 100%;
+            margin-bottom: 20px;
+        }
+        #videoElement, #canvasElement {
+            width: 640px;
+            height: 480px;
+            background-color: #000;
+            margin: 0 auto;
+            display: block;
+        }
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+        button {
+            padding: 8px 16px;
+            border: none;
+            border-radius: 4px;
+            background-color: #007bff;
+            color: white;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        .brightness-control {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .stats {
+            background-color: #f8f9fa;
+            padding: 15px;
+            border-radius: 4px;
+        }
+        .stats h3 {
+            color: #ffd700;
+            margin-top: 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="video-container">
+            <video id="videoElement" autoplay playsinline></video>
+            <canvas id="canvasElement" style="display: none;"></canvas>
+        </div>
+        
+        <div class="controls">
+            <button id="startButton">Start Camera</button>
+            <button id="stopButton">Stop Camera</button>
+            <button id="toggleDetection">Toggle Bean Detection</button>
+            <div class="brightness-control">
+                <label for="brightness">Brightness:</label>
+                <input type="range" id="brightness" min="-100" max="100" value="0">
+            </div>
+        </div>
+
+        <div class="stats">
+            <h3>Statistical Results</h3>
+            <p id="yellowCount">Yellow beans: 0</p>
+            <p id="greenCount">Green beans: 0</p>
+        </div>
+    </div>
+
+    <script>
+        let stream = null;
+        let isRunning = false;
+        let isDetectionEnabled = false;
+        let cv = null; // OpenCV.js instance
+
+        function onOpenCvReady() {
+            cv = window.cv;
+            console.log('OpenCV.js is ready');
+        }
+
+        const video = document.getElementById('videoElement');
+        const canvas = document.getElementById('canvasElement');
+        const ctx = canvas.getContext('2d');
+
+        // 设置Canvas尺寸
+        canvas.width = 640;
+        canvas.height = 480;
+
+        // 启动摄像头
+        document.getElementById('startButton').addEventListener('click', async () => {
+            try {
+                stream = await navigator.mediaDevices.getUserMedia({ video: {
+                    width: { ideal: 640 },
+                    height: { ideal: 480 }
+                }});
+                video.srcObject = stream;
+                isRunning = true;
+                updateFrame();
+            } catch (err) {
+                console.error('Error accessing camera:', err);
+                alert('无法打开摄像头');
+            }
+        });
+
+        // 停止摄像头
+        document.getElementById('stopButton').addEventListener('click', () => {
+            if (stream) {
+                stream.getTracks().forEach(track => track.stop());
+                video.srcObject = null;
+                isRunning = false;
+            }
+        });
+
+        // 切换豆子检测
+        document.getElementById('toggleDetection').addEventListener('click', () => {
+            isDetectionEnabled = !isDetectionEnabled;
+        });
+
+        // 亮度调节
+        document.getElementById('brightness').addEventListener('input', (e) => {
+            // 在Canvas中实现亮度调节
+            if (isRunning) {
+                const brightness = parseInt(e.target.value);
+                updateFrame(brightness);
+            }
+        });
+
+        // 更新帧
+        function detectBeans(frame) {
+            const src = cv.imread(frame);
+            const dst = new cv.Mat();
+            const hsv = new cv.Mat();
+            cv.cvtColor(src, hsv, cv.COLOR_RGBA2RGB);
+            cv.cvtColor(hsv, hsv, cv.COLOR_RGB2HSV);
+
+            // 黄豆的HSV范围
+            const yellowLower = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [15, 30, 150, 0]);
+            const yellowUpper = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [35, 150, 255, 0]);
+            const yellowMask = new cv.Mat();
+            cv.inRange(hsv, yellowLower, yellowUpper, yellowMask);
+
+            // 绿豆的HSV范围
+            const greenLower = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [35, 40, 40, 0]);
+            const greenUpper = new cv.Mat(hsv.rows, hsv.cols, hsv.type(), [90, 255, 200, 0]);
+            const greenMask = new cv.Mat();
+            cv.inRange(hsv, greenLower, greenUpper, greenMask);
+
+            // 形态学处理
+            const kernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(7, 7));
+            cv.morphologyEx(yellowMask, yellowMask, cv.MORPH_CLOSE, kernel);
+            cv.morphologyEx(yellowMask, yellowMask, cv.MORPH_OPEN, kernel);
+            cv.morphologyEx(greenMask, greenMask, cv.MORPH_CLOSE, kernel);
+            cv.morphologyEx(greenMask, greenMask, cv.MORPH_OPEN, kernel);
+
+            // 寻找轮廓
+            const yellowContours = new cv.MatVector();
+            const greenContours = new cv.MatVector();
+            const hierarchy = new cv.Mat();
+            cv.findContours(yellowMask, yellowContours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+            cv.findContours(greenMask, greenContours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+            // 计数和绘制
+            let yellowCount = 0;
+            let greenCount = 0;
+
+            for (let i = 0; i < yellowContours.size(); ++i) {
+                const cnt = yellowContours.get(i);
+                const area = cv.contourArea(cnt);
+                if (area > 200) {
+                    yellowCount++;
+                    cv.drawContours(src, yellowContours, i, new cv.Scalar(0, 255, 255), 2);
+                }
+                cnt.delete();
+            }
+
+            for (let i = 0; i < greenContours.size(); ++i) {
+                const cnt = greenContours.get(i);
+                const area = cv.contourArea(cnt);
+                if (area > 100) {
+                    greenCount++;
+                    cv.drawContours(src, greenContours, i, new cv.Scalar(0, 255, 0), 2);
+                }
+                cnt.delete();
+            }
+
+            // 更新统计数据
+            document.getElementById('yellowCount').textContent = `Yellow beans: ${yellowCount}`;
+            document.getElementById('greenCount').textContent = `Green beans: ${greenCount}`;
+
+            // 清理内存
+            cv.imshow('canvasElement', src);
+            src.delete();
+            dst.delete();
+            hsv.delete();
+            yellowMask.delete();
+            greenMask.delete();
+            yellowLower.delete();
+            yellowUpper.delete();
+            greenLower.delete();
+            greenUpper.delete();
+            kernel.delete();
+            yellowContours.delete();
+            greenContours.delete();
+            hierarchy.delete();
+
+            return { yellowCount, greenCount };
+        }
+
+        function updateFrame(brightness = 0) {
+            if (!isRunning) return;
+
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            let imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            let data = imageData.data;
+
+            // 应用亮度调整
+            if (brightness !== 0) {
+                for (let i = 0; i < data.length; i += 4) {
+                    data[i] = Math.min(255, Math.max(0, data[i] + brightness));
+                    data[i + 1] = Math.min(255, Math.max(0, data[i + 1] + brightness));
+                    data[i + 2] = Math.min(255, Math.max(0, data[i + 2] + brightness));
+                }
+            }
+
+            ctx.putImageData(imageData, 0, 0);
+
+            // 如果启用豆子检测且OpenCV.js已加载
+            if (isDetectionEnabled && cv) {
+                detectBeans(canvas);
+            }
+
+            requestAnimationFrame(() => updateFrame(brightness));
+        }
+    </script>
+</body>
+</html>
